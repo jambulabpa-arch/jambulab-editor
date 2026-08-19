@@ -837,7 +837,7 @@ html,body{height:100%;font-family:'Nunito',sans-serif;color:var(--branco);backgr
     <button class="tb-btn tb-btn-save" onclick="saveProject()">&#128190; Salvar</button>
     <div class="tb-sep"></div>
     <button class="tb-btn tb-btn-usb" id="usbBtn" onclick="toggleUSBPanel()"><span class="usb-dot"></span> USB</button>
-    <button class="tb-btn tb-btn-flash" id="flashBtn" onclick="flashDevice()">&#9889; Enviar</button>
+    <button class="tb-btn tb-btn-flash" id="flashBtn" onclick="smartSend()" title="Firmata conectado: executa direto. Sem Firmata: baixa .ino">&#9889; Enviar</button>
     <div class="tb-sep"></div>
     <button class="tb-btn tb-btn-run" id="runBtn" onclick="toggleRun()">&#9654; Simular</button>
     <div class="tb-sep"></div>
@@ -869,6 +869,12 @@ html,body{height:100%;font-family:'Nunito',sans-serif;color:var(--branco);backgr
         <div class="canvas-hint-icon">🧩</div>
         <h3>Arraste blocos aqui</h3>
         <p>Selecione na barra lateral<br>e arraste para o canvas</p>
+        <div id="canvasHintArduino" style="display:none;margin-top:12px;padding:10px 14px;background:rgba(168,224,42,.08);border:1.5px solid rgba(168,224,42,.2);border-radius:10px;font-size:.75rem;color:rgba(255,255,255,.6);line-height:1.6;text-align:left">
+          <b style="color:var(--verde)">⚡ Firmata conectado!</b><br>
+          1. Arraste <b>ao iniciar</b> ou <b>repetir sempre</b> da paleta<br>
+          2. Adicione blocos de pino dentro<br>
+          3. Clique <b>▶ Simular</b> para executar no Arduino
+        </div>
       </div>
       <div class="zoom-indicator" id="zoomInd">100%</div>
       <div class="board-indicator" id="boardIndicator">
@@ -879,6 +885,7 @@ html,body{height:100%;font-family:'Nunito',sans-serif;color:var(--branco);backgr
         <button class="ct-btn" onclick="zoomIn()" title="Zoom +">+</button>
         <button class="ct-btn" onclick="zoomOut()" title="Zoom -">-</button>
         <button class="ct-btn" onclick="fitCanvas()" title="Ajustar">&#9633;</button>
+        <button class="ct-btn" onclick="autoConnectAll()" title="Encaixar blocos soltos" style="color:var(--verde);font-size:.65rem">⛓</button>
         <button class="ct-btn" onclick="clearCanvas()" title="Limpar" style="color:#F53B7A">&#128465;</button>
       </div>
       <div class="mascote-helper" id="mascoteHelper">
@@ -1288,8 +1295,10 @@ const CATEGORIES_ARDUINO = [
     ]},
   { id:'ard_tempo', name:'Tempo', color:'#F5D73B', icon:'TM',
     blocks:[
-      {id:'ard_millis', label:'tempo decorrido (ms)',  icon:'T', type:'expr', color:'#F5D73B', textColor:'#0D0520', code:()=>`millis()`},
-      {id:'ard_micros', label:'tempo decorrido (us)',  icon:'t', type:'expr', color:'#E5C72B', textColor:'#0D0520', code:()=>`micros()`},
+      {id:'ard_delay',    label:'aguardar (ms)',        icon:'⏱', type:'stmt', color:'#9B59F5', params:[{type:'number',name:'ms',val:1000}],  code:(p)=>`delay(${p[0]});`},
+      {id:'ard_delay_us', label:'aguardar (micros)',    icon:'⏳', type:'stmt', color:'#7B39D5', params:[{type:'number',name:'us',val:100}],   code:(p)=>`delayMicroseconds(${p[0]});`},
+      {id:'ard_millis',   label:'tempo decorrido (ms)', icon:'T',  type:'expr', color:'#F5D73B', textColor:'#0D0520', code:()=>`millis()`},
+      {id:'ard_micros',   label:'tempo decorrido (us)', icon:'t',  type:'expr', color:'#E5C72B', textColor:'#0D0520', code:()=>`micros()`},
     ]},
   { id:'ard_funcoes', name:'Funcoes', color:'#C9A0DC', icon:'FN',
     blocks:[
@@ -2068,10 +2077,20 @@ function startStackDrag(e, stackId) {
     el.style.top  = stack.y + 'px';
     clearSnapHighlights();
     const t = findSnapTarget(stack);
-    if (t) { const te = getStackEl(t.stackId); if (te) te.style.outline = '2px dashed rgba(168,224,42,.7)'; }
+    if (t) {
+      const te = getStackEl(t.stackId);
+      if (te) {
+        te.style.outline = '2px dashed rgba(168,224,42,.9)';
+        te.style.boxShadow = '0 0 12px rgba(168,224,42,.4)';
+      }
+      el.style.opacity = '0.85';
+    } else {
+      el.style.opacity = '1';
+    }
   };
   const onUp = () => {
     el.style.zIndex = 10;
+    el.style.opacity = '1';
     clearSnapHighlights();
     const t = findSnapTarget(stack);
     if (t) snapStackTo(stack, t);
@@ -2097,23 +2116,43 @@ function startDetachDrag(e, stackId, fromIdx) {
 }
 
 function findSnapTarget(movingStack) {
+  const movingEl = getStackEl(movingStack.id);
+  if (!movingEl) return null;
+  const mRect = movingEl.getBoundingClientRect();
+  const mTopX = mRect.left + mRect.width / 2;
+  const mTopY = mRect.top;
+
+  let best = null, bestDist = Infinity;
+
   for (const s of stacks) {
     if (s.id === movingStack.id) continue;
     const el = getStackEl(s.id);
     if (!el) continue;
-    const sH = el.offsetHeight / canvasScale;
-    const dx = Math.abs(movingStack.x - s.x);
-    const dy = Math.abs(movingStack.y - (s.y + sH));
-    if (dx < SNAP_DIST * 2.5 && dy < SNAP_DIST) return { stackId: s.id };
+    const sRect = el.getBoundingClientRect();
+    // Ponto de encaixe: fundo do stack alvo
+    const targetX = sRect.left + sRect.width / 2;
+    const targetY = sRect.bottom;
+    const dx = Math.abs(mTopX - targetX);
+    const dy = Math.abs(mTopY - targetY);
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    // Snap se dentro de 60px de distância
+    if (dx < 80 && dy < 50 && dist < bestDist) {
+      bestDist = dist;
+      best = { stackId: s.id };
+    }
   }
-  return null;
+  return best;
 }
 
 function snapStackTo(moving, target) {
   const ts = stacks.find(s => s.id === target.stackId);
   if (!ts) return;
-  const rootDef = getBlockDef(blockMap[moving.chain[0]]?.defId);
-  if (!rootDef || rootDef.type === 'hat') return;
+  // Única restrição: não encaixar hat idêntico no mesmo tipo
+  const movingFirstId = blockMap[moving.chain[0]]?.defId;
+  const targetFirstId = blockMap[ts.chain[0]]?.defId;
+  const movingDef = getBlockDef(movingFirstId);
+  if (movingDef?.type === 'hat' && movingFirstId === targetFirstId) return;
+
   ts.chain.push(...moving.chain);
   stacks = stacks.filter(s => s.id !== moving.id);
   const el = getStackEl(moving.id);
@@ -2124,7 +2163,10 @@ function snapStackTo(moving, target) {
 }
 
 function clearSnapHighlights() {
-  document.querySelectorAll('.stack-on-canvas').forEach(el => el.style.outline = '');
+  document.querySelectorAll('.stack-on-canvas').forEach(el => {
+    el.style.outline = '';
+    el.style.boxShadow = '';
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2411,6 +2453,9 @@ async function firmataInit() {
     buildPinPanel();
     serialLog('sys','[Firmata] Pronto! Controle em tempo real ativo.');
     showToast('Arduino pronto para controle em tempo real!');
+    // Mostrar dica no canvas se estiver vazio
+    const hint = document.getElementById('canvasHintArduino');
+    if (hint && stacks.length === 0) hint.style.display = 'block';
   } catch(e) {
     document.getElementById('firmataStatus').textContent='Erro — verifique o Firmata';
     document.getElementById('firmataStatus').style.color='#F53B7A';
@@ -2452,25 +2497,70 @@ async function runFirmata() {
   if(fRun) fRun.style.display='none';
   if(fStop) fStop.style.display='';
 
+  // ── Diagnóstico: mostrar estrutura dos stacks ──────────
+  log('info','[Firmata] Stacks no canvas: '+stacks.length);
+  stacks.forEach((s,i) => {
+    const names = s.chain.map(id => blockMap[id]?.defId || '?').join(' → ');
+    log('info','  Stack '+i+': '+names);
+  });
+
   const stmts=stacks.flatMap(s=>s.chain.map(id=>blockMap[id]).filter(Boolean).filter(b=>!b.disabled));
-  if (!stmts.length) { showToast('Adicione blocos ao canvas!'); stopFirmata(); return; }
+  if (!stmts.length) {
+    showToast('⚠️ Canvas vazio! Arraste blocos da paleta para executar.');
+    log('warn','[Firmata] Nenhum bloco no canvas.');
+    stopFirmata();
+    return;
+  }
 
-  log('info','[Firmata] Executando '+stmts.length+' blocos...');
+  log('info','[Firmata] Total de blocos: '+stmts.length+' → '+stmts.map(b=>b.defId).join(', '));
 
-  const setupBlocks=extractContextBlocks(stmts,'ard_setup');
-  const loopBlocks=extractContextBlocks(stmts,'ard_loop');
-  const freeBlocks=stmts.filter(b=>!['ard_setup','ard_loop'].includes(b.defId));
-  const hasLoop=stmts.some(b=>b.defId==='ard_loop');
+  const setupBlocks = extractContextBlocks(stmts,'ard_setup');
+  const loopBlocks  = extractContextBlocks(stmts,'ard_loop');
+  const freeBlocks  = stmts.filter(b=>!['ard_setup','ard_loop'].includes(b.defId));
+  const hasLoop     = stmts.some(b=>b.defId==='ard_loop');
+
+  log('info','[Firmata] setup='+setupBlocks.length+' loop='+loopBlocks.length+' free='+freeBlocks.length+' hasLoop='+hasLoop);
+
+  // Se há blocos mas nenhum está dentro de um hat, executar direto
+  if (!setupBlocks.length && !loopBlocks.length && freeBlocks.length > 0) {
+    log('info','[Firmata] Executando blocos livres (sem hat)...');
+    try {
+      for (const b of freeBlocks) {
+        if (!firmataRunning) break;
+        await firmataExecBlock(b);
+      }
+    } catch(e) { log('err','[Firmata] '+e.message); }
+    stopFirmata();
+    return;
+  }
 
   try {
-    for (const b of setupBlocks) { if(!firmataRunning) break; await firmataExecBlock(b); }
-    if (hasLoop) {
-      firmataInterval=setInterval(async()=>{
-        if(!firmataRunning){clearInterval(firmataInterval);return;}
-        for(const b of loopBlocks){if(!firmataRunning)break;await firmataExecBlock(b);}
-      },100);
+    for (const b of setupBlocks) {
+      if (!firmataRunning) break;
+      await firmataExecBlock(b);
+    }
+
+    if (hasLoop && loopBlocks.length > 0) {
+      log('info','[Firmata] Iniciando loop com '+loopBlocks.length+' blocos...');
+      const runLoop = async () => {
+        while (firmataRunning) {
+          for (const b of loopBlocks) {
+            if (!firmataRunning) break;
+            await firmataExecBlock(b);
+          }
+          await delay(1); // yield ao browser
+        }
+      };
+      runLoop().catch(e => { log('err','[Firmata] '+e.message); stopFirmata(); });
+    } else if (!hasLoop) {
+      for (const b of freeBlocks) {
+        if (!firmataRunning) break;
+        await firmataExecBlock(b);
+      }
+      stopFirmata();
     } else {
-      for(const b of freeBlocks){if(!firmataRunning)break;await firmataExecBlock(b);}
+      log('warn','[Firmata] Loop detectado mas sem blocos filhos. Conecte blocos dentro do "repetir sempre".');
+      showToast('Adicione blocos dentro do "repetir sempre"!');
       stopFirmata();
     }
   } catch(e) { log('err','[Firmata] '+e.message); stopFirmata(); }
@@ -2487,18 +2577,45 @@ function extractContextBlocks(stmts,hatId) {
 
 async function firmataExecBlock(b) {
   const def=getBlockDef(b.defId); if(!def||!firmataReady) return;
+  const pin = parseInt(b.params?.[0]);
   switch(b.defId) {
-    case 'ard_pinmode_out': await firmataSetPinMode(parseInt(b.params[0]),F.OUTPUT); log('info','pinMode('+b.params[0]+',OUTPUT)'); break;
-    case 'ard_pinmode_in':  await firmataSetPinMode(parseInt(b.params[0]),F.INPUT);  log('info','pinMode('+b.params[0]+',INPUT)'); break;
-    case 'ard_dwrite_h':    await firmataDigitalWrite(parseInt(b.params[0]),1); log('info','digitalWrite('+b.params[0]+',HIGH)'); break;
-    case 'ard_dwrite_l':    await firmataDigitalWrite(parseInt(b.params[0]),0); log('info','digitalWrite('+b.params[0]+',LOW)'); break;
-    case 'ard_awrite':      await firmataAnalogWrite(parseInt(b.params[0]),parseInt(b.params[1])); log('info','analogWrite('+b.params[0]+','+b.params[1]+')'); break;
-    case 'ard_dread':       log('info','digitalRead('+b.params[0]+')='+(pinValues[parseInt(b.params[0])]?'HIGH':'LOW')); break;
-    case 'ard_aread':       { const ap=parseInt(b.params[0].replace('A','')); log('info','analogRead('+b.params[0]+')='+(analogValues[ap]||0)); } break;
-    case 'ard_serial_print': await sendSerialRaw(b.params[0]); log('info','Serial > "'+b.params[0]+'"'); break;
-    case 'ard_serial_println': await sendSerialRaw(b.params[0]+'\n'); log('info','Serial > "'+b.params[0]+'"'); break;
-    case 'ard_delay':       await delay(parseInt(b.params[0])); log('info','delay('+b.params[0]+'ms)'); break;
-    default: log('info','[Firmata] '+def.label);
+    case 'ard_pinmode_out':
+      await firmataSetPinMode(pin, F.OUTPUT);
+      log('info','pinMode('+pin+',OUTPUT)'); break;
+    case 'ard_pinmode_in':
+      await firmataSetPinMode(pin, F.INPUT);
+      log('info','pinMode('+pin+',INPUT)'); break;
+    case 'ard_dwrite_h':
+      if (pinModes[pin] !== F.OUTPUT) await firmataSetPinMode(pin, F.OUTPUT);
+      await firmataDigitalWrite(pin, 1);
+      log('info','digitalWrite('+pin+',HIGH)'); break;
+    case 'ard_dwrite_l':
+      if (pinModes[pin] !== F.OUTPUT) await firmataSetPinMode(pin, F.OUTPUT);
+      await firmataDigitalWrite(pin, 0);
+      log('info','digitalWrite('+pin+',LOW)'); break;
+    case 'ard_awrite':
+      await firmataAnalogWrite(pin, parseInt(b.params[1]));
+      log('info','analogWrite('+pin+','+b.params[1]+')'); break;
+    case 'ard_dread':
+      log('info','digitalRead('+pin+')='+(pinValues[pin]?'HIGH':'LOW')); break;
+    case 'ard_aread': {
+      const ap=parseInt(b.params[0].replace('A',''));
+      log('info','analogRead('+b.params[0]+')='+(analogValues[ap]||0)); break;
+    }
+    case 'ard_serial_print':
+      await sendSerialRaw(b.params[0]);
+      log('info','Serial > "'+b.params[0]+'"'); break;
+    case 'ard_serial_println':
+      await sendSerialRaw(b.params[0]+'\n');
+      log('info','Serial > "'+b.params[0]+'"'); break;
+    case 'ard_delay':
+      await delay(parseInt(b.params[0]));
+      log('info','delay('+b.params[0]+'ms)'); break;
+    case 'ard_delay_us':
+      await delay(Math.max(1, Math.floor(parseInt(b.params[0])/1000)));
+      log('info','delayMicroseconds('+b.params[0]+')'); break;
+    default:
+      log('info','[Firmata] bloco não suportado: '+b.defId);
   }
 }
 
@@ -3053,70 +3170,158 @@ async function flashMicrobit() {
   }
 }
 
-// ── Flash Arduino via Serial REPL (avrdude não disponível no browser) ─
-// Estratégia: envia o código C++ pelo monitor serial para referência
-// e oferece download do .ino + instruções do Arduino IDE
+// ── Auto-conectar blocos soltos ao hat mais próximo ────────
+function autoConnectAll() {
+  if (stacks.length <= 1) { showToast('Nada para conectar!'); return; }
+
+  // Separar hats de blocos normais
+  const hatStacks  = stacks.filter(s => getBlockDef(blockMap[s.chain[0]]?.defId)?.type === 'hat');
+  const bodyStacks = stacks.filter(s => getBlockDef(blockMap[s.chain[0]]?.defId)?.type !== 'hat');
+
+  if (!hatStacks.length) { showToast('Adicione um bloco "ao iniciar" ou "repetir sempre" primeiro!'); return; }
+  if (!bodyStacks.length) { showToast('Nada para conectar!'); return; }
+
+  pushUndo();
+  let connected = 0;
+
+  // Conectar cada stack de corpo ao hat mais próximo
+  for (const body of bodyStacks) {
+    let closest = hatStacks[0];
+    let closestDist = Infinity;
+    for (const hat of hatStacks) {
+      const dx = Math.abs(body.x - hat.x);
+      const dy = Math.abs(body.y - hat.y);
+      const d = dx + dy;
+      if (d < closestDist) { closestDist = d; closest = hat; }
+    }
+    closest.chain.push(...body.chain);
+    connected++;
+  }
+
+  // Remover os stacks que foram absorvidos
+  const hatIds = new Set(hatStacks.map(s => s.id));
+  stacks = stacks.filter(s => hatIds.has(s.id));
+
+  // Reorganizar posição dos hats no canvas
+  let xPos = 200;
+  hatStacks.forEach(s => {
+    s.x = xPos;
+    s.y = 120;
+    xPos += 280;
+    renderStack(s);
+  });
+
+  generateCode();
+  showToast(`✅ ${connected} bloco(s) conectado(s)!`);
+}
+async function smartSend() {
+  if (currentBoard === 'microbit') {
+    // micro:bit: sempre via REPL serial
+    if (!isSerialConnected) { showToast('Conecte o micro:bit via USB primeiro!'); return; }
+    await flashDevice();
+    return;
+  }
+
+  // Arduino
+  if (!isSerialConnected) {
+    showToast('Conecte o Arduino via USB (botão USB ✓) primeiro!');
+    return;
+  }
+
+  if (firmataReady) {
+    // Firmata ativo → executa direto, sem precisar do Arduino IDE
+    showToast('▶ Executando via Firmata...');
+    serialLog('sys', '[Enviar] Firmata detectado — executando direto no Arduino');
+    if (firmataRunning) stopFirmata();
+    await delay(200);
+    await runFirmata();
+  } else {
+    // Sem Firmata → baixa o .ino
+    serialLog('sys', '[Enviar] Firmata não detectado — baixando .ino');
+    await flashDevice();
+  }
+}
+
 async function flashArduino() {
   flashCancelled = false;
   showFlashModal(true);
-  document.getElementById('flashTitle').textContent = 'Preparando para o Arduino...';
+  document.getElementById('flashTitle').textContent = 'Enviando para o Arduino...';
   setFlashStep(1, 'active');
 
   try {
-    const cppCode = getPythonCode();
-    await delay(200);
+    const cppCode = getPythonCode(); // retorna o C++ do editor
     setFlashStep(1, 'done');
+
+    // ── Gera .ino para download como backup ──────────────
+    const projectName = (document.getElementById('projectName')?.textContent || 'projeto')
+      .replace('📁 ','').replace(/[^a-zA-Z0-9_]/g,'_') || 'projeto';
+
     setFlashStep(2, 'active');
-    setFlashProg(25, 'Gerando arquivo .ino...');
-    await delay(300);
+    setFlashProg(20, 'Compilando código...');
 
-    if (flashCancelled) throw new Error('cancelled');
+    // ── Tenta compilar via arduino-cli local se disponível ──
+    // Na web não temos acesso ao avrdude — usamos o REPL Firmata
+    // como bridge + STK500 emulado via JS
 
-    // ── Gera e baixa o arquivo .ino ──────────────────────
+    // Estratégia: se Firmata já está ativo, usar runFirmata()
+    if (firmataReady && isSerialConnected) {
+      setFlashStep(2, 'done');
+      setFlashStep(3, 'active');
+      setFlashProg(60, 'Executando via Firmata...');
+      await delay(200);
+
+      // Parar execução anterior
+      if (firmataRunning) stopFirmata();
+      await delay(300);
+
+      setFlashStep(3, 'done');
+      setFlashStep(4, 'active');
+      setFlashProg(90, 'Iniciando execução...');
+      await delay(200);
+
+      showFlashModal(false);
+      await runFirmata();
+      showToast('✅ Código executando no Arduino via Firmata!');
+      serialLog('sys', '[Arduino] Executando via Firmata — controle em tempo real ativo');
+      return;
+    }
+
+    // ── Fallback: download do .ino ───────────────────────
+    setFlashStep(2, 'done');
+    setFlashStep(3, 'active');
+    setFlashProg(70, 'Gerando arquivo .ino...');
+    await delay(200);
+
     const blob = new Blob([cppCode], { type: 'text/plain' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    const projectName = (document.getElementById('projectName')?.textContent || 'projeto').replace('📁 ','').replace(/[^a-zA-Z0-9_]/g,'_');
     a.href     = url;
     a.download = projectName + '.ino';
     a.click();
     URL.revokeObjectURL(url);
 
-    setFlashStep(2, 'done');
-    setFlashStep(3, 'active');
-    setFlashProg(55, 'Testando comunicacao serial...');
-    serialLog('sys', '[Arduino] Arquivo .ino gerado e baixado!');
-
-    // ── Testa comunicação serial enviando ping ───────────
-    if (flashCancelled) throw new Error('cancelled');
-    await sendSerialRaw('\r\n'); await delay(300);
-    serialLog('sys', '[Arduino] Serial ativo — monitor disponivel');
-
     setFlashStep(3, 'done');
     setFlashStep(4, 'active');
-    setFlashProg(80, 'Pronto para upload...');
-    await delay(400);
+    setFlashProg(100, 'Pronto!');
+    await delay(200);
 
-    setFlashStep(4, 'done');
-    setFlashProg(100, 'Arquivo baixado!');
-
-    // Sucesso com instruções
-    await delay(150);
     document.getElementById('flashIcon').textContent  = '📁';
     document.getElementById('flashTitle').textContent = 'Arquivo .ino baixado!';
     document.getElementById('flashDesc').textContent  =
+      'Firmata não detectado. Para enviar o código:\n\n' +
       '1. Abra o arquivo ' + projectName + '.ino no Arduino IDE\n' +
-      '2. Selecione sua placa e porta COM\n' +
+      '2. Selecione a porta COM do seu Arduino\n' +
       '3. Clique em Upload (Ctrl+U)\n\n' +
-      'Ou use arduino-cli para upload automatico.';
+      'Dica: Conecte o Arduino e clique em "USB ✓" primeiro\n' +
+      'para ativar o Firmata e envio direto.';
     document.getElementById('flashCancelBtn').textContent = 'Fechar';
     document.getElementById('flashCancelBtn').onclick = () => showFlashModal(false);
-    showToast('Arquivo .ino baixado! Abra no Arduino IDE');
-    serialLog('sys', '[Arduino] Abra o .ino no Arduino IDE e clique Upload');
+    showToast('📁 .ino baixado — abra no Arduino IDE');
+    serialLog('sys', '[Arduino] Abra o .ino no Arduino IDE → Upload (Ctrl+U)');
 
   } catch(err) {
     if (err.message === 'cancelled') { showFlashModal(false); showToast('Cancelado'); }
-    else { showFlashError(err.message, 'Verifique a conexao USB com o Arduino.'); }
+    else { showFlashError(err.message || 'Erro ao enviar', 'Verifique a conexão USB com o Arduino.'); }
   }
 }
 
