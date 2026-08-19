@@ -1036,6 +1036,7 @@ html,body{height:100%;font-family:'Nunito',sans-serif;color:var(--branco);backgr
             <div style="background:rgba(0,151,156,.1);border:1.5px solid rgba(0,151,156,.3);border-radius:10px;padding:10px;margin-bottom:10px">
               <div style="font-size:.75rem;font-weight:900;color:#5DCBCE;margin-bottom:6px">Firmata — Controle em Tempo Real</div>
               <div style="font-size:.7rem;color:rgba(255,255,255,.45);font-weight:600;line-height:1.5">Blocos executam direto no Arduino ao clicar Executar. Sem recompilar!</div>
+            <button onclick="testarLED13()" style="margin-top:8px;width:100%;padding:8px;border-radius:8px;background:rgba(168,224,42,.15);border:1.5px solid rgba(168,224,42,.3);color:var(--verde);font-family:'Nunito',sans-serif;font-weight:800;font-size:.78rem;cursor:pointer;">🔦 Testar LED pino 13</button>
             </div>
 
             <!-- Painel de pinos digitais -->
@@ -3214,6 +3215,29 @@ function autoConnectAll() {
   generateCode();
   showToast(`✅ ${connected} bloco(s) conectado(s)!`);
 }
+// ── Teste rápido LED pino 13 ───────────────────────────────
+async function testarLED13() {
+  if (!serialWriter) { showToast('Conecte o Arduino primeiro!'); return; }
+  showToast('🔦 Testando LED pino 13...');
+  serialLog('sys', '[Teste] Piscando LED pino 13 (3x)...');
+  const write = async (bytes) => await serialWriter.write(new Uint8Array(bytes));
+  await write([0xF4, 13, 1]); // pinMode 13 OUTPUT
+  await delay(100);
+  for (let i = 0; i < 3; i++) {
+    await write([0x91, (1<<5), 0]); // porta 1, pino 13 HIGH
+    serialLog('sys', '[Teste] digitalWrite(13, HIGH)');
+    await delay(500);
+    await write([0x91, 0, 0]); // pino 13 LOW
+    serialLog('sys', '[Teste] digitalWrite(13, LOW)');
+    await delay(500);
+  }
+  serialLog('sys', '[Teste] Concluído! LED piscou 3x.');
+  showToast('✅ LED piscou 3x! Firmata OK');
+  // Corrigir pinValues para o firmataDigitalWrite saber o estado atual
+  pinValues[13] = 0;
+  updatePinButton(13);
+}
+
 async function smartSend() {
   if (currentBoard === 'microbit') {
     // micro:bit: sempre via REPL serial
